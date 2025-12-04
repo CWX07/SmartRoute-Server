@@ -168,38 +168,40 @@ app.post("/ai/train-fare-model", async (req, res) => {
     const prompt = `
     You are a fare modeller for Kuala Lumpur rail and BRT.
 
-    You are given observed fares for several transit lines. Each line has many samples with:
-    - from station name
-    - to station name
-    - distance_km (approximate)
-    - fare (MYR)
+    You receive training samples per line. Each sample has:
+    - distance_km
+    - fare
 
-    Derive a simple fare model for EACH line of the form:
+    Your job: derive a SIMPLE fare model for each line:
 
-    fare ≈ base + per_km * distance_km
+    fare = base + per_km * distance_km
 
-    Also infer reasonable min_fare and max_fare per line based on the samples.
+    Also infer reasonable min_fare and max_fare for the line.
 
-    Return ONLY valid JSON matching this schema:
+    IMPORTANT:
+    - Return ONLY **pure JSON**
+    - NO markdown
+    - NO code fences
+    - NO comments
+    - The JSON **must be directly parseable by JSON.parse()**
+
+    The required JSON structure is exactly:
 
     {
       "currency": "MYR",
       "lines": {
         "<LINE_ID>": {
-          "base": number,
-          "per_km": number,
-          "min_fare": number,
-          "max_fare": number
-        },
-        ...
+          "base": 1.0,
+          "per_km": 0.2,
+          "min_fare": 1.1,
+          "max_fare": 6.0
+        }
       }
     }
 
-    Do NOT include any text outside the JSON.
+    Now generate this JSON based on the following training data:
 
-    Here is the training data:
-
-    ${JSON.stringify(trainingData, null, 2)}
+    ${JSON.stringify(trainingData)}
     `;
 
     const completion = await client.responses.create({

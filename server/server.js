@@ -7,17 +7,20 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
+dotenv.config();
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // In-memory fare model cache
 let FARE_MODEL = null;
 
-dotenv.config();
-
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+app.use("/fare", express.static(path.join(__dirname, "..", "fare")));
+app.use("/output", express.static(path.join(__dirname, "..", "output")));
 
 // OpenAI client
 const client = new OpenAI({

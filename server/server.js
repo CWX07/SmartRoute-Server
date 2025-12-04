@@ -21,6 +21,8 @@ app.use(express.json());
 
 app.use("/fare", express.static(path.join(__dirname, "..", "fare")));
 app.use("/output", express.static(path.join(__dirname, "..", "output")));
+app.use("/data.gov.my", express.static(path.join(__dirname, "..", "data.gov.my")));
+app.use("/gtfs", express.static(path.join(__dirname, "..", "gtfs")));
 
 // OpenAI client
 const client = new OpenAI({

@@ -199,7 +199,6 @@ app.post("/ai/train-fare-model", async (req, res) => {
           "base": 1.0,
           "per_km": 0.2,
           "min_fare": 1.1,
-          "max_fare": 6.0
         }
       }
     }

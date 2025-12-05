@@ -54,7 +54,6 @@ app.post("/ai/estimate", async (req, res) => {
   try {
     const baseline = req.body;
 
-    // Build a strict, safe prompt
     const prompt = `
     You are a transport realism estimator for Kuala Lumpur.
 
@@ -86,10 +85,19 @@ app.post("/ai/estimate", async (req, res) => {
       input: prompt,
     });
 
-    const outputText = completion.output_text.trim();
-    const json = JSON.parse(outputText);
+    // CLEAN JSON BEFORE PARSE
+    let outputText = completion.output_text.trim();
+
+    outputText = outputText
+      .replace(/^```json/i, "")
+      .replace(/^```/i, "")
+      .replace(/```$/, "")
+      .trim();
+
+    let json = JSON.parse(outputText);
 
     return res.json({ ok: true, correction: json });
+
   } catch (err) {
     console.error("AI error:", err);
     return res.json({ ok: false, error: "AI call failed", fallback: true });
@@ -104,7 +112,9 @@ app.post("/ai/train-fare-model", async (req, res) => {
     const faresPath = path.join(__dirname, "..", "fare", "fares.json");
     const stationsPath = path.join(__dirname, "..", "output", "station.json");
 
-    const fares = JSON.parse(fs.readFileSync(faresPath, "utf8"));
+    const faresRaw = JSON.parse(fs.readFileSync(faresPath, "utf8"));
+    const fares = faresRaw.lines || faresRaw; // backward compatible: if no .lines, assume flat map
+    const crossLineFares = faresRaw.cross_lines || faresRaw.crossLines || {};
     const stations = JSON.parse(fs.readFileSync(stationsPath, "utf8"));
 
     /* -------------------------------
@@ -138,6 +148,7 @@ app.post("/ai/train-fare-model", async (req, res) => {
        Build training samples per line
     -------------------------------- */
     const trainingData = {};
+    const crossLineTraining = {};
 
     for (const [lineId, pairs] of Object.entries(fares)) {
       const samples = [];
@@ -186,6 +197,60 @@ app.post("/ai/train-fare-model", async (req, res) => {
     }
 
     /* -------------------------------
+       Cross-line training samples (line pairs)
+    -------------------------------- */
+    for (const [pairKeyRaw, pairs] of Object.entries(crossLineFares)) {
+      const normalizedPair = normalizeLinePairKey(pairKeyRaw);
+      if (!normalizedPair) {
+        console.warn("[SKIP] Invalid cross-line key:", pairKeyRaw);
+        continue;
+      }
+
+      const samples = [];
+
+      for (const [key, fare] of Object.entries(pairs || {})) {
+        if (typeof fare !== "number") continue;
+        const parts = key.split("||");
+        if (parts.length !== 2) continue;
+
+        const fromName = normalizeName(parts[0]);
+        const toName = normalizeName(parts[1]);
+
+        const fromSt = stationIndex[fromName];
+        const toSt = stationIndex[toName];
+
+        if (!fromSt || !toSt) {
+          console.warn("[CROSS-SKIP] Station mismatch:", {
+            pair: normalizedPair,
+            from: fromName,
+            to: toName,
+          });
+          continue;
+        }
+
+        const dk = distanceKm(
+          { lat: fromSt.lat, lng: fromSt.lng },
+          { lat: toSt.lat, lng: toSt.lng }
+        );
+        if (!dk || !isFinite(dk) || dk <= 0) continue;
+
+        samples.push({
+          from: fromName,
+          to: toName,
+          distance_km: +dk.toFixed(3),
+          fare,
+          from_line: normalizeLineId(fromSt.route_id),
+          to_line: normalizeLineId(toSt.route_id),
+        });
+      }
+
+      if (samples.length > 0) {
+        if (!crossLineTraining[normalizedPair]) crossLineTraining[normalizedPair] = [];
+        crossLineTraining[normalizedPair].push(...samples);
+      }
+    }
+
+    /* -------------------------------
        Build AI training prompt
     -------------------------------- */
     const prompt = `
@@ -215,11 +280,23 @@ app.post("/ai/train-fare-model", async (req, res) => {
           "min_fare": 1.1,
           "max_fare": 6.0
         }
+      },
+      "cross_lines": {
+        "<LINE_A|LINE_B>": {
+          "base": 1.0,
+          "per_km": 0.25,
+          "transfer_penalty": 0.0, // optional flat MYR per transfer
+          "min_fare": 1.5,
+          "max_fare": 9.0
+        }
       }
     }
 
     Training data:
     ${JSON.stringify(trainingData)}
+
+    Cross-line samples (keys are sorted pairs like "KJ|MRT"):
+    ${JSON.stringify(crossLineTraining)}
     `;
 
     const completion = await client.responses.create({
@@ -227,23 +304,34 @@ app.post("/ai/train-fare-model", async (req, res) => {
       input: prompt,
     });
 
-    let raw = completion.output_text.trim();
-    raw = raw.replace(/^```json/i, "").replace(/```$/, "").trim();
+    const outputText = completion.output_text.trim();
+
+    // Strip accidental Markdown fences the model may output
+    let cleaned = outputText
+      .replace(/^```json/i, "")
+      .replace(/^```/i, "")
+      .replace(/```$/, "")
+      .trim();
 
     let model;
     try {
-      model = JSON.parse(raw);
+      model = JSON.parse(cleaned);
     } catch (e) {
-      console.error("AI JSON parse failed:", raw);
+      console.error("AI JSON parse failed:", cleaned);
       return res.status(500).json({ ok: false, error: "Invalid JSON from AI" });
     }
 
-    if (!model.lines || Object.keys(model.lines).length === 0) {
+    const hasLineModels = model.lines && Object.keys(model.lines).length > 0;
+    const hasCrossModels = model.cross_lines && Object.keys(model.cross_lines).length > 0;
+    if (!hasLineModels && !hasCrossModels) {
       return res.status(500).json({ ok: false, error: "Empty AI model — training failed" });
     }
 
     FARE_MODEL = model;
-    console.log("[FareModel] Loaded trained model:", Object.keys(model.lines));
+    console.log("[FareModel] Loaded trained model:", {
+      lines: Object.keys(model.lines || {}),
+      cross_lines: Object.keys(model.cross_lines || {}),
+    });
 
     const modelPath = path.join(__dirname, "..", "fare", "fare-model.json");
     fs.writeFileSync(modelPath, JSON.stringify(model, null, 2), "utf8");
@@ -288,6 +376,17 @@ function normalizeLineId(lineId) {
   if (!lineId) return null;
   const up = lineId.toUpperCase();
   return LineMap[up] || up;
+}
+
+function normalizeLinePairKey(pairKey) {
+  if (!pairKey) return null;
+  const parts = String(pairKey)
+    .split("|")
+    .map((p) => normalizeLineId(p))
+    .filter(Boolean)
+    .sort();
+  if (parts.length < 2) return null;
+  return parts.join("|");
 }
 
 /* ---------------------------------------------
